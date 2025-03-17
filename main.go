@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -93,22 +94,85 @@ func inc(ip net.IP) {
 	}
 }
 
-func main() {
-	startIP := "192.168.1.1"
-	endIP := "192.168.1.255"
-	portRange := "1-1024"
-	timeout := 500 * time.Millisecond
+func getGatewayIP() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
 
-	ips, err := generateIPs(startIP, endIP)
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+				// Assuming gateway is first host in network
+				ip := ipnet.IP.To4()
+				ip[3] = 1
+				return ip.String()
+			}
+		}
+	}
+	return ""
+}
+
+func checkInternetConnectivity() bool {
+	return pingHost("8.8.8.8", 2*time.Second)
+}
+
+func main() {
+	mode := flag.String("mode", "range", "Scan mode: range, specific, gateway, internet")
+	startIP := flag.String("start", "192.168.1.1", "Start IP address for range scan")
+	endIP := flag.String("end", "192.168.1.255", "End IP address for range scan")
+	specificIP := flag.String("ip", "", "Specific IP address to scan")
+	portRange := flag.String("ports", "1-1024", "Port range to scan (e.g., 80 or 1-1024)")
+	timeout := flag.Duration("timeout", 500*time.Millisecond, "Timeout for each scan")
+	flag.Parse()
+
+	switch *mode {
+	case "internet":
+		if checkInternetConnectivity() {
+			fmt.Println("Internet is accessible (Google DNS 8.8.8.8 responds to ping)")
+		} else {
+			fmt.Println("No internet connectivity detected")
+		}
+		return
+
+	case "gateway":
+		gatewayIP := getGatewayIP()
+		if gatewayIP == "" {
+			fmt.Println("Could not determine gateway IP")
+			return
+		}
+		*startIP = gatewayIP
+		*endIP = gatewayIP
+
+	case "specific":
+		if *specificIP == "" {
+			fmt.Println("Please provide a specific IP address using -ip flag")
+			return
+		}
+		*startIP = *specificIP
+		*endIP = *specificIP
+	}
+
+	var ips []string
+	var err error
+	ips, err = generateIPs(*startIP, *endIP)
 	if err != nil {
 		fmt.Printf("Error generating IP range: %v\n", err)
 		return
 	}
 
 	ports := make([]int, 0)
-	portParts := strings.Split(portRange, "-")
+	portParts := strings.Split(*portRange, "-")
 	startPort, _ := strconv.Atoi(portParts[0])
-	endPort, _ := strconv.Atoi(portParts[1])
+	endPort := startPort
+	if len(portParts) > 1 {
+		endPort, _ = strconv.Atoi(portParts[1])
+	}
 
 	for i := startPort; i <= endPort; i++ {
 		ports = append(ports, i)
@@ -120,7 +184,7 @@ func main() {
 	var hostMutex sync.Mutex
 
 	for _, ip := range ips {
-		if pingHost(ip, timeout) {
+		if pingHost(ip, *timeout) {
 			fmt.Printf("Host %s is up, scanning ports...\n", ip)
 			hostMutex.Lock()
 			activeHosts[ip] = true
@@ -129,7 +193,7 @@ func main() {
 				wg.Add(1)
 				go func(ip string, port int) {
 					defer wg.Done()
-					results <- scanPort(ip, port, timeout)
+					results <- scanPort(ip, port, *timeout)
 				}(ip, port)
 			}
 		} else {
@@ -154,6 +218,8 @@ func main() {
 	for ip := range activeHosts {
 		if ports, ok := openPorts[ip]; ok {
 			fmt.Printf("Host %s has %d open ports: %v\n", ip, len(ports), ports)
+		} else {
+			fmt.Printf("Host %s is up but has no open ports in the specified range\n", ip)
 		}
 	}
 }

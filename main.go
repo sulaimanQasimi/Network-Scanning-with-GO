@@ -116,10 +116,15 @@ func main() {
 
 	var wg sync.WaitGroup
 	results := make(chan ScanResult, len(ips)*len(ports))
+	activeHosts := make(map[string]bool)
+	var hostMutex sync.Mutex
 
 	for _, ip := range ips {
 		if pingHost(ip, timeout) {
 			fmt.Printf("Host %s is up, scanning ports...\n", ip)
+			hostMutex.Lock()
+			activeHosts[ip] = true
+			hostMutex.Unlock()
 			for _, port := range ports {
 				wg.Add(1)
 				go func(ip string, port int) {
@@ -137,9 +142,18 @@ func main() {
 		close(results)
 	}()
 
+	openPorts := make(map[string][]int)
 	for result := range results {
 		if result.Open {
-			fmt.Printf("Open port %d on %s\n", result.Port, result.IP)
+			openPorts[result.IP] = append(openPorts[result.IP], result.Port)
+		}
+	}
+
+	fmt.Printf("\nScan Summary:\n")
+	fmt.Printf("Total active hosts found: %d\n", len(activeHosts))
+	for ip := range activeHosts {
+		if ports, ok := openPorts[ip]; ok {
+			fmt.Printf("Host %s has %d open ports: %v\n", ip, len(ports), ports)
 		}
 	}
 }
